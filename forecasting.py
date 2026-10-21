@@ -13,10 +13,15 @@ from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 from statsmodels.tsa.arima.model import ARIMA
 from statsmodels.tsa.stattools import adfuller
 
-import tensorflow as tf
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense, Dropout
-from tensorflow.keras.callbacks import EarlyStopping
+
+try:
+    import tensorflow as tf
+    TENSORFLOW_AVAILABLE = True
+    TENSORFLOW_ERROR = ""
+except (ImportError, OSError) as e:
+    tf = None
+    TENSORFLOW_AVAILABLE = False
+    TENSORFLOW_ERROR = str(e)
 
 DATASETS = {
     "West Africa (2014-2016)": {
@@ -91,18 +96,27 @@ def _make_windows(arr, lookback):
     return np.array(X), np.array(y)
 
 
+
 def _build_lstm_model(lookback):
-    model = Sequential([
-        LSTM(64, activation="tanh", return_sequences=True, input_shape=(lookback, 1)),
-        Dropout(0.2),
-        LSTM(32, activation="tanh"),
-        Dropout(0.2),
-        Dense(16, activation="relu"),
-        Dense(1),
+    if not TENSORFLOW_AVAILABLE:
+        raise RuntimeError(
+            "LSTM is unavailable because TensorFlow could not be loaded. "
+            f"Details: {TENSORFLOW_ERROR}"
+        )
+
+    model = tf.keras.Sequential([
+        tf.keras.layers.LSTM(
+            64, activation="tanh", return_sequences=True,
+            input_shape=(lookback, 1)
+        ),
+        tf.keras.layers.Dropout(0.2),
+        tf.keras.layers.LSTM(32, activation="tanh"),
+        tf.keras.layers.Dropout(0.2),
+        tf.keras.layers.Dense(16, activation="relu"),
+        tf.keras.layers.Dense(1),
     ])
     model.compile(optimizer="adam", loss="mse")
     return model
-
 
 def fit_lstm(series: pd.Series, split_idx: int, lookback: int, epochs=100, seed=42,
              progress_cb=None, log_transform=True):
@@ -117,6 +131,11 @@ def fit_lstm(series: pd.Series, split_idx: int, lookback: int, epochs=100, seed=
     """
     tf.random.set_seed(seed)
     np.random.seed(seed)
+
+    if not TENSORFLOW_AVAILABLE:
+        raise RuntimeError(
+            f"LSTM is unavailable: {TENSORFLOW_ERROR}"
+        )
 
     raw = series.values.reshape(-1, 1).astype(float)
     working = np.log1p(raw) if log_transform else raw
@@ -135,7 +154,7 @@ def fit_lstm(series: pd.Series, split_idx: int, lookback: int, epochs=100, seed=
 
     model = _build_lstm_model(lookback)
 
-    callbacks = [EarlyStopping(monitor="loss", patience=10, restore_best_weights=True)]
+    callbacks = [tf.keras.callbacks.EarlyStopping(monitor="loss", patience=10, restore_best_weights=True)]
     if progress_cb:
         class _CB(tf.keras.callbacks.Callback):
             def on_epoch_end(self, epoch, logs=None):
@@ -183,7 +202,7 @@ def fit_lstm_pooled(train_series: dict, test_series: dict, lookback: int,
     y_train = np.concatenate(y_train_all)
 
     model = _build_lstm_model(lookback)
-    callbacks = [EarlyStopping(monitor="loss", patience=10, restore_best_weights=True)]
+    callbacks = [tf.keras.callbacks.EarlyStopping(monitor="loss", patience=10, restore_best_weights=True)]
     if progress_cb:
         class _CB(tf.keras.callbacks.Callback):
             def on_epoch_end(self, epoch, logs=None):
@@ -222,10 +241,33 @@ def naive_forecast(train: pd.Series, test_len: int, method="last") -> np.ndarray
     return np.full(test_len, value)
 
 
+
 def evaluate(y_true, y_pred) -> dict:
-    y_true, y_pred = np.asarray(y_true), np.asarray(y_pred)
+    """Evaluate predictions in the original case-count scale."""
+    y_true = np.asarray(y_true, dtype=float).ravel()
+    y_pred = np.asarray(y_pred, dtype=float).ravel()
+
+    if len(y_true) != len(y_pred):
+        raise ValueError("Actual values and predictions must have equal lengths.")
+
+    if len(y_true) == 0:
+        raise ValueError("Cannot evaluate empty predictions.")
+
+    if not np.isfinite(y_true).all() or not np.isfinite(y_pred).all():
+        raise ValueError("Actual values and predictions must be finite.")
+
+    absolute_errors = np.abs(y_true - y_pred)
+    actual_total = np.abs(y_true).sum()
+
+    wape = (
+        float(absolute_errors.sum() / actual_total * 100)
+        if actual_total > 0
+        else float("nan")
+    )
+
     return {
         "rmse": float(np.sqrt(mean_squared_error(y_true, y_pred))),
         "mae": float(mean_absolute_error(y_true, y_pred)),
         "r2": float(r2_score(y_true, y_pred)),
+        "wape": wape,
     }

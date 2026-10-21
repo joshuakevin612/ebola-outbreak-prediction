@@ -1,7 +1,9 @@
 streamlit
-pandas
-numpy
+pandas<3
+numpy<2.2
 matplotlib
 scikit-learn
 statsmodels
-tensorflow
+tensorflow>=2.15,<2.20
+joblib
+scipy
